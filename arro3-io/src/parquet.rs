@@ -87,7 +87,7 @@ async fn read_parquet_async_inner(
 ///
 /// This loads only the Parquet footer (no data pages) and exposes row-group
 /// level metadata, including per-row-group statistics via [`PyParquetFile::statistics`].
-#[pyclass(module = "arro3.io", name = "ParquetFile", frozen)]
+#[pyclass(module = "arro3.io", name = "ParquetFile", subclass, frozen)]
 pub(crate) struct PyParquetFile {
     meta: ArrowReaderMetadata,
 }
@@ -103,16 +103,25 @@ impl PyParquetFile {
         skip_arrow_metadata: bool,
         page_index: bool,
     ) -> Arro3IoResult<Self> {
+        // `PageIndexPolicy::Optional` matches the user expectation of
+        // "load the page index if present, otherwise skip". The upstream
+        // `From<bool>` impl maps `true` to `Required`, which errors if the
+        // index is missing — a surprising footgun for users opting in.
+        let page_index_policy = if page_index {
+            PageIndexPolicy::Optional
+        } else {
+            PageIndexPolicy::Skip
+        };
         let options = ArrowReaderOptions::new()
             .with_skip_arrow_metadata(skip_arrow_metadata)
-            .with_page_index_policy(PageIndexPolicy::from(page_index));
+            .with_page_index_policy(page_index_policy);
         let meta = ArrowReaderMetadata::load(&mut file, options)?;
         Ok(Self { meta })
     }
 
     /// The Arrow schema of this Parquet file.
     #[getter]
-    fn schema(&self) -> Arro3Schema {
+    fn schema_arrow(&self) -> Arro3Schema {
         self.meta.schema().clone().into()
     }
 
@@ -132,6 +141,15 @@ impl PyParquetFile {
     #[getter]
     fn num_columns(&self) -> usize {
         self.meta.schema().fields().len()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "arro3.io.ParquetFile(num_rows={}, num_row_groups={}, num_columns={})",
+            self.num_rows(),
+            self.num_row_groups(),
+            self.num_columns(),
+        )
     }
 
     /// Row-group statistics for a single column.
@@ -160,10 +178,16 @@ impl PyParquetFile {
         let max_values = converter.row_group_maxes(parquet_meta.row_groups())?;
         let null_counts = converter.row_group_null_counts(parquet_meta.row_groups())?;
 
+        // When `missing_null_counts_as_zero` is true, `null_counts` is
+        // guaranteed to contain no nulls, so the field is non-nullable.
         let schema = Arc::new(Schema::new(vec![
             Field::new("min", min_values.data_type().clone(), true),
             Field::new("max", max_values.data_type().clone(), true),
-            Field::new("null_count", null_counts.data_type().clone(), true),
+            Field::new(
+                "null_count",
+                null_counts.data_type().clone(),
+                !missing_null_counts_as_zero,
+            ),
         ]));
         let batch =
             RecordBatch::try_new(schema, vec![min_values, max_values, Arc::new(null_counts)])?;

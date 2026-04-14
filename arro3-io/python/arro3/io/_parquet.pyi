@@ -56,15 +56,17 @@ class ParquetFile:
             skip_arrow_metadata: If `True`, do not decode the embedded Arrow
                 schema stored in the Parquet key-value metadata. Defaults to
                 `False`.
-            page_index: If `True`, load the Parquet page index as part of the
-                footer read. Defaults to `False`.
+            page_index: If `True`, opportunistically load the Parquet page
+                index as part of the footer read (loaded if present, skipped
+                otherwise). Defaults to `False`.
 
         Returns:
             A new `ParquetFile` wrapping the file's footer metadata.
         """
 
+    def __repr__(self) -> str: ...
     @property
-    def schema(self) -> core.Schema:
+    def schema_arrow(self) -> core.Schema:
         """The Arrow schema of this Parquet file."""
 
     @property

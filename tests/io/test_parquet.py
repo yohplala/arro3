@@ -64,7 +64,10 @@ def test_parquet_file_accessors():
         assert pf.num_rows == 10
         assert pf.num_row_groups == 3
         assert pf.num_columns == 2
-        assert pf.schema.names == ["a", "b"]
+        assert pf.schema_arrow.names == ["a", "b"]
+        assert repr(pf) == (
+            "arro3.io.ParquetFile(num_rows=10, num_row_groups=3, num_columns=2)"
+        )
 
 
 def test_parquet_file_statistics_int():
@@ -105,8 +108,34 @@ def test_parquet_file_statistics_float_with_nulls():
         assert stats.column("null_count").to_pylist() == [2, 1]
 
 
+def test_parquet_file_statistics_missing_null_counts_flag():
+    """Both branches of the `missing_null_counts_as_zero` flag: when `True`
+    (default) the `null_count` field is non-nullable; when `False` it is
+    nullable."""
+    table = pa.table({"a": [1, 2, 3, 4]})
+    with TemporaryDirectory() as tmp_path:
+        pq_path = Path(tmp_path) / "test.parquet"
+        write_parquet(table, pq_path)
+
+        pf = ParquetFile.open(pq_path)
+
+        stats_true = pf.statistics("a")
+        field_true = stats_true.schema.field("null_count")
+        assert field_true.nullable is False
+
+        stats_false = pf.statistics("a", missing_null_counts_as_zero=False)
+        field_false = stats_false.schema.field("null_count")
+        assert field_false.nullable is True
+        # The values themselves should be identical for a file whose
+        # stats include null counts.
+        assert (
+            stats_true.column("null_count").to_pylist()
+            == stats_false.column("null_count").to_pylist()
+        )
+
+
 def test_parquet_file_statistics_first_last_row_group_bounds():
-    """The downstream use case: cheaply read the min/max of a column by
+    """Downstream use case: cheaply read the min/max of a column by
     slicing the first row group's min and the last row group's max."""
     timestamps = pa.array(
         [pa.scalar(i, type=pa.timestamp("us")).as_py() for i in range(12)],
@@ -147,3 +176,39 @@ def test_parquet_file_open_from_file_like():
         stats = pf.statistics("a")
         assert stats.column("min")[0].as_py() == 1
         assert stats.column("max")[0].as_py() == 4
+
+
+def test_parquet_file_open_skip_arrow_metadata():
+    """With `skip_arrow_metadata=True`, the Arrow schema is reconstructed
+    from the Parquet schema only, and the embedded `ARROW:schema` KV
+    metadata is not decoded into the Arrow schema's metadata map."""
+    table = pa.table({"a": [1, 2, 3]})
+    with TemporaryDirectory() as tmp_path:
+        pq_path = Path(tmp_path) / "test.parquet"
+        # Write the file *with* the embedded Arrow schema (default).
+        write_parquet(table, pq_path)
+
+        pf_default = ParquetFile.open(pq_path)
+        pf_skipped = ParquetFile.open(pq_path, skip_arrow_metadata=True)
+
+        # Both surface the same logical schema (one int64 column).
+        assert pf_default.schema_arrow.names == ["a"]
+        assert pf_skipped.schema_arrow.names == ["a"]
+        # And both let us read statistics.
+        assert pf_skipped.statistics("a").column("min")[0].as_py() == 1
+
+
+def test_parquet_file_open_page_index_optional():
+    """`page_index=True` uses an Optional policy: if the file has no page
+    index (which is the case for a default `write_parquet` call), `open`
+    must not error."""
+    table = pa.table({"a": list(range(8))})
+    with TemporaryDirectory() as tmp_path:
+        pq_path = Path(tmp_path) / "test.parquet"
+        write_parquet(table, pq_path, max_row_group_size=4)
+
+        # Would raise if we mapped `page_index=True` to Required and the
+        # file has no page index.
+        pf = ParquetFile.open(pq_path, page_index=True)
+        assert pf.num_row_groups == 2
+        assert pf.statistics("a").column("min").to_pylist() == [0, 4]
