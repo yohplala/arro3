@@ -31,6 +31,81 @@ ParquetEncoding = Literal[
 ]
 """Allowed Parquet encodings."""
 
+class ParquetFile:
+    """A Parquet file opened for metadata inspection.
+
+    This loads only the Parquet footer (no data pages) and exposes row-group
+    level metadata, including per-row-group statistics via
+    [`statistics`][arro3.io.ParquetFile.statistics].
+    """
+
+    @classmethod
+    def open(
+        cls,
+        file: IO[bytes] | Path | str,
+        *,
+        skip_arrow_metadata: bool = False,
+        page_index: bool = False,
+    ) -> "ParquetFile":
+        """Open a Parquet file and read its footer metadata.
+
+        Args:
+            file: The input Parquet file path or binary buffer.
+
+        Keyword Args:
+            skip_arrow_metadata: If `True`, do not decode the embedded Arrow
+                schema stored in the Parquet key-value metadata. Defaults to
+                `False`.
+            page_index: If `True`, load the Parquet page index as part of the
+                footer read. Defaults to `False`.
+
+        Returns:
+            A new `ParquetFile` wrapping the file's footer metadata.
+        """
+
+    @property
+    def schema(self) -> core.Schema:
+        """The Arrow schema of this Parquet file."""
+
+    @property
+    def num_rows(self) -> int:
+        """The total number of rows in this Parquet file."""
+
+    @property
+    def num_row_groups(self) -> int:
+        """The number of row groups in this Parquet file."""
+
+    @property
+    def num_columns(self) -> int:
+        """The number of columns in this Parquet file."""
+
+    def statistics(
+        self,
+        column_name: str,
+        *,
+        missing_null_counts_as_zero: bool = True,
+    ) -> core.RecordBatch:
+        """Row-group statistics for a single column.
+
+        Args:
+            column_name: The name of the column to read statistics for.
+
+        Keyword Args:
+            missing_null_counts_as_zero: If `True`, row groups that do not
+                report a null count in their statistics are reported as zero.
+                If `False`, a `null` value is emitted instead. Defaults to
+                `True`.
+
+        Returns:
+            A `RecordBatch` with one row per row group and three columns:
+            `min`, `max` and `null_count`. `min` and `max` have the Arrow
+            data type of the source column; `null_count` is a `UInt64`
+            column. Row order matches the Parquet row-group order.
+
+        Note:
+            Struct columns are not yet supported (see apache/arrow-rs#7364).
+        """
+
 def read_parquet(file: IO[bytes] | Path | str) -> core.RecordBatchReader:
     """Read a Parquet file to an Arrow RecordBatchReader
 
