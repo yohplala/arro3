@@ -127,6 +127,27 @@ def test_parquet_file_statistics_first_last_row_group_bounds():
         assert hi == timestamps[-1].as_py()
 
 
+def test_parquet_file_statistics_bounds_arro3_native():
+    """Same as the `first_last_row_group_bounds` test, but exercising the
+    arro3-native API with no pyarrow wrapping on the result side — this is
+    the recommended downstream usage pattern."""
+    timestamps = pa.array(
+        [pa.scalar(i, type=pa.timestamp("us")).as_py() for i in range(12)],
+        type=pa.timestamp("us"),
+    )
+    table = pa.table({"timestamp": timestamps})
+    with TemporaryDirectory() as tmp_path:
+        pq_path = Path(tmp_path) / "test.parquet"
+        _write_multi_row_group(pq_path, table, rows_per_group=4)
+
+        pf = ParquetFile.open(pq_path)
+        stats = pf.statistics("timestamp")  # arro3.core.RecordBatch
+        lo = stats.column("min")[0].as_py()
+        hi = stats.column("max")[-1].as_py()
+        assert lo == timestamps[0].as_py()
+        assert hi == timestamps[-1].as_py()
+
+
 def test_parquet_file_statistics_unknown_column_raises():
     table = pa.table({"a": [1, 2, 3]})
     with TemporaryDirectory() as tmp_path:
