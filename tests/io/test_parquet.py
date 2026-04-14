@@ -132,7 +132,7 @@ def test_parquet_file_statistics_unknown_column_raises():
         write_parquet(table, pq_path)
 
         pf = ParquetFile.open(pq_path)
-        with pytest.raises(Exception):
+        with pytest.raises(Exception, match="not_a_column"):
             pf.statistics("not_a_column")
 
 
