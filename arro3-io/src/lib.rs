@@ -60,6 +60,7 @@ fn _io(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(parquet::read_parquet))?;
     m.add_wrapped(wrap_pyfunction!(parquet::read_parquet_async))?;
     m.add_wrapped(wrap_pyfunction!(parquet::write_parquet))?;
+    m.add_class::<parquet::PyParquetFile>()?;
 
     Ok(())
 }

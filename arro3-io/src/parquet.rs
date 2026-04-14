@@ -2,20 +2,25 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use arrow_array::{RecordBatchIterator, RecordBatchReader};
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use arrow_array::{Array, RecordBatch, RecordBatchIterator, RecordBatchReader};
+use arrow_schema::{Field, Schema};
+use parquet::arrow::arrow_reader::statistics::StatisticsConverter;
+use parquet::arrow::arrow_reader::{
+    ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
+};
 use parquet::arrow::arrow_writer::ArrowWriterOptions;
 use parquet::arrow::async_reader::ParquetObjectReader;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, Encoding};
-use parquet::file::metadata::KeyValue;
+use parquet::file::metadata::{KeyValue, PageIndexPolicy};
 use parquet::file::properties::{WriterProperties, WriterVersion};
 use parquet::schema::types::ColumnPath;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedStr;
+use pyo3::types::PyType;
 use pyo3_arrow::error::PyArrowResult;
-use pyo3_arrow::export::Arro3RecordBatchReader;
+use pyo3_arrow::export::{Arro3RecordBatch, Arro3RecordBatchReader, Arro3Schema};
 use pyo3_arrow::input::AnyRecordBatch;
 use pyo3_arrow::{PyRecordBatchReader, PyTable};
 use pyo3_object_store::PyObjectStore;
@@ -76,6 +81,118 @@ async fn read_parquet_async_inner(
 
     let batches = reader.try_collect::<Vec<_>>().await?;
     Ok(PyTable::try_new(batches, arrow_schema)?)
+}
+
+/// A Parquet file opened for metadata inspection.
+///
+/// This loads only the Parquet footer (no data pages) and exposes row-group
+/// level metadata, including per-row-group statistics via [`PyParquetFile::statistics`].
+#[pyclass(module = "arro3.io", name = "ParquetFile", subclass, frozen)]
+pub(crate) struct PyParquetFile {
+    meta: ArrowReaderMetadata,
+}
+
+#[pymethods]
+impl PyParquetFile {
+    /// Open a Parquet file and read its footer metadata.
+    #[classmethod]
+    #[pyo3(signature = (file, *, skip_arrow_metadata = false, page_index = false))]
+    fn open(
+        _cls: &Bound<PyType>,
+        mut file: FileReader,
+        skip_arrow_metadata: bool,
+        page_index: bool,
+    ) -> Arro3IoResult<Self> {
+        // `PageIndexPolicy::Optional` matches the user expectation of
+        // "load the page index if present, otherwise skip". The upstream
+        // `From<bool>` impl maps `true` to `Required`, which errors if the
+        // index is missing — a surprising footgun for users opting in.
+        let page_index_policy = if page_index {
+            PageIndexPolicy::Optional
+        } else {
+            PageIndexPolicy::Skip
+        };
+        let options = ArrowReaderOptions::new()
+            .with_skip_arrow_metadata(skip_arrow_metadata)
+            .with_page_index_policy(page_index_policy);
+        let meta = ArrowReaderMetadata::load(&mut file, options)?;
+        Ok(Self { meta })
+    }
+
+    /// The Arrow schema of this Parquet file.
+    #[getter]
+    fn schema_arrow(&self) -> Arro3Schema {
+        self.meta.schema().clone().into()
+    }
+
+    /// The total number of rows in this Parquet file.
+    #[getter]
+    fn num_rows(&self) -> i64 {
+        self.meta.metadata().file_metadata().num_rows()
+    }
+
+    /// The number of row groups in this Parquet file.
+    #[getter]
+    fn num_row_groups(&self) -> usize {
+        self.meta.metadata().num_row_groups()
+    }
+
+    /// The number of columns in this Parquet file.
+    #[getter]
+    fn num_columns(&self) -> usize {
+        self.meta.schema().fields().len()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "arro3.io.ParquetFile(num_rows={}, num_row_groups={}, num_columns={})",
+            self.num_rows(),
+            self.num_row_groups(),
+            self.num_columns(),
+        )
+    }
+
+    /// Row-group statistics for a single column.
+    ///
+    /// Returns a `RecordBatch` with one row per row group and the columns
+    /// `min`, `max` and `null_count`. `min` and `max` take the Arrow data
+    /// type of the source column; `null_count` is a `UInt64` column.
+    ///
+    /// Note: struct columns are not yet supported upstream
+    /// (see apache/arrow-rs#7364).
+    #[pyo3(signature = (column_name, *, missing_null_counts_as_zero = true))]
+    fn statistics(
+        &self,
+        column_name: &str,
+        missing_null_counts_as_zero: bool,
+    ) -> Arro3IoResult<Arro3RecordBatch> {
+        let parquet_meta = self.meta.metadata();
+        let converter = StatisticsConverter::try_new(
+            column_name,
+            self.meta.schema(),
+            self.meta.parquet_schema(),
+        )?
+        .with_missing_null_counts_as_zero(missing_null_counts_as_zero);
+
+        let min_values = converter.row_group_mins(parquet_meta.row_groups())?;
+        let max_values = converter.row_group_maxes(parquet_meta.row_groups())?;
+        let null_counts = converter.row_group_null_counts(parquet_meta.row_groups())?;
+
+        // When `missing_null_counts_as_zero` is true, `null_counts` is
+        // guaranteed to contain no nulls, so the field is non-nullable.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("min", min_values.data_type().clone(), true),
+            Field::new("max", max_values.data_type().clone(), true),
+            Field::new(
+                "null_count",
+                null_counts.data_type().clone(),
+                !missing_null_counts_as_zero,
+            ),
+        ]));
+        let batch =
+            RecordBatch::try_new(schema, vec![min_values, max_values, Arc::new(null_counts)])?;
+        Ok(batch.into())
+    }
 }
 
 pub(crate) struct PyWriterVersion(WriterVersion);
